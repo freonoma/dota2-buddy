@@ -1,0 +1,19 @@
+{
+  "name": "dota2-buddy",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Dota 2 Buddy — draft assistant with real-time pick/ban recommendations for Ranked All Pick",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently -n backend,frontend -c blue,magenta \"npm:dev -w backend\" \"npm:dev -w frontend\"",
+    "build": "npm run build -w backend && npm run build -w frontend",
+    "fetch-data": "npm run fetch-data -w backend",
+    "start": "npm run start -w backend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

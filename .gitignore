@@ -1,0 +1,25 @@
+# Dependencies and build output
+node_modules/
+dist/
+.vite/
+
+# Logs and OS junk
+*.log
+.DS_Store
+
+# Local config (API keys, personal player info)
+.env
+.env.local
+
+# Personal data — your hero comfort ratings, friend ID, MMR.
+# Auto-generated on first run from your .env values, then edited in the
+# Profile UI / overwritten by screenshot imports.
+backend/data/player_profile.json
+
+# Generated cache from `npm run fetch-data` (OpenDota hero stats and
+# matchups). Same data for everyone, but big and patch-dependent — refetch
+# instead of committing.
+backend/data/matchups.json
+backend/data/hero_stats.json
+
+.claude
