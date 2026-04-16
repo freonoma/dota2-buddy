@@ -7,6 +7,7 @@
 //   - STRATZ_API_KEY set → Stratz GraphQL (bracket-filtered matchups)
 //   - otherwise          → OpenDota REST (global matchups, free, slower)
 
+import "dotenv/config";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
