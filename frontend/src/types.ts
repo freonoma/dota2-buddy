@@ -26,7 +26,6 @@ export interface RecommendationBreakdown {
   synergyScore: number;
   metaScore: number;
   comfortScore: number;
-  roleScore: number;
 }
 
 export interface Recommendation {

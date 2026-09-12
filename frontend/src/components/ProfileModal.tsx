@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DraftStore } from "../hooks/useDraftStore";
 import type { Hero, PlayerProfile, ScreenshotImportResult } from "../types";
 import { HeroPortrait } from "./HeroPortrait";
@@ -20,6 +20,9 @@ const RANKS: PlayerProfile["rankBracket"][] = [
   "immortal",
 ];
 
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 interface HealthStatus {
   extractionMode: "api" | "cli";
   cliBinary: string | null;
@@ -36,10 +39,15 @@ export function ProfileModal({ store, open, onClose }: Props) {
   const [pendingRows, setPendingRows] = useState<EditableRow[]>([]);
   const [unmatchedNotice, setUnmatchedNotice] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  const dirtyRef = useRef(false);
+  const panelRef = useRef<HTMLDivElement>(null);
 
+  // A server push must not clobber edits the user has not saved.
   useEffect(() => {
+    if (open && dirtyRef.current) return;
+    dirtyRef.current = false;
     setDraft(profile);
-  }, [profile]);
+  }, [open, profile]);
 
   useEffect(() => {
     if (!open) return;
@@ -52,13 +60,53 @@ export function ProfileModal({ store, open, onClose }: Props) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const panel = panelRef.current;
+      if (!panel) return;
+      // offsetParent is null for display:none, dropping the hidden file input.
+      const focusable = Array.from(
+        panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
+      ).filter((el) => el.offsetParent !== null);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (!panel.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      } else if (e.shiftKey && (active === first || active === panel)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
+  const showing = open && draft !== null;
+
+  useEffect(() => {
+    if (!showing) return;
+    const restoreTo = document.activeElement as HTMLElement | null;
+    panelRef.current?.focus();
+    return () => {
+      restoreTo?.focus();
+    };
+  }, [showing]);
+
   if (!open || !draft) return null;
+
+  const editDraft = (update: (current: PlayerProfile) => PlayerProfile) => {
+    dirtyRef.current = true;
+    setDraft((d) => (d ? update(d) : d));
+  };
 
   const handleSave = () => {
     saveProfile(draft);
@@ -66,8 +114,7 @@ export function ProfileModal({ store, open, onClose }: Props) {
   };
 
   const setComfort = (heroId: number, level: 1 | 2 | 3 | 4 | 5 | 0) => {
-    setDraft((d) => {
-      if (!d) return d;
+    editDraft((d) => {
       const next = { ...d, heroComfort: { ...d.heroComfort } };
       if (level === 0) {
         delete next.heroComfort[heroId];
@@ -146,6 +193,17 @@ export function ProfileModal({ store, open, onClose }: Props) {
       if (!res.ok) {
         throw new Error(json.error ?? `HTTP ${res.status}`);
       }
+      const saved = json.profile as PlayerProfile;
+      // Merge so unsaved ratings for other heroes survive the import.
+      setDraft((d) => {
+        if (!d) return d;
+        const heroComfort = { ...d.heroComfort };
+        for (const row of pendingRows) {
+          const entry = saved.heroComfort[row.heroId];
+          if (entry) heroComfort[row.heroId] = entry;
+        }
+        return { ...d, heroComfort };
+      });
       setPendingRows([]);
       setUnmatchedNotice(null);
     } catch (e) {
@@ -167,11 +225,19 @@ export function ProfileModal({ store, open, onClose }: Props) {
       onClick={onClose}
     >
       <div
-        className="panel w-full max-w-4xl max-h-[90vh] flex flex-col"
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="profile-modal-title"
+        tabIndex={-1}
+        className="panel w-full max-w-4xl max-h-[90vh] flex flex-col focus:outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="panel-header">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
+          <h2
+            id="profile-modal-title"
+            className="text-sm font-semibold uppercase tracking-wide text-slate-300"
+          >
             Player Profile
           </h2>
           <button onClick={onClose} className="btn-ghost">
@@ -187,7 +253,7 @@ export function ProfileModal({ store, open, onClose }: Props) {
                 type="text"
                 value={draft.name}
                 onChange={(e) =>
-                  setDraft({ ...draft, name: e.target.value })
+                  editDraft((d) => ({ ...d, name: e.target.value }))
                 }
                 className="input"
               />
@@ -197,7 +263,7 @@ export function ProfileModal({ store, open, onClose }: Props) {
                 type="text"
                 value={draft.friendId ?? ""}
                 onChange={(e) =>
-                  setDraft({ ...draft, friendId: e.target.value })
+                  editDraft((d) => ({ ...d, friendId: e.target.value }))
                 }
                 className="input"
               />
@@ -207,10 +273,10 @@ export function ProfileModal({ store, open, onClose }: Props) {
                 type="number"
                 value={draft.mmr ?? ""}
                 onChange={(e) =>
-                  setDraft({
-                    ...draft,
+                  editDraft((d) => ({
+                    ...d,
                     mmr: e.target.value ? Number(e.target.value) : undefined,
-                  })
+                  }))
                 }
                 className="input"
               />
@@ -219,10 +285,10 @@ export function ProfileModal({ store, open, onClose }: Props) {
               <select
                 value={draft.rankBracket}
                 onChange={(e) =>
-                  setDraft({
-                    ...draft,
+                  editDraft((d) => ({
+                    ...d,
                     rankBracket: e.target.value as PlayerProfile["rankBracket"],
-                  })
+                  }))
                 }
                 className="input"
               >
@@ -246,12 +312,12 @@ export function ProfileModal({ store, open, onClose }: Props) {
                   <button
                     key={r}
                     onClick={() =>
-                      setDraft({
-                        ...draft,
-                        preferredRoles: on
-                          ? draft.preferredRoles.filter((x) => x !== r)
-                          : [...draft.preferredRoles, r].sort(),
-                      })
+                      editDraft((d) => ({
+                        ...d,
+                        preferredRoles: d.preferredRoles.includes(r)
+                          ? d.preferredRoles.filter((x) => x !== r)
+                          : [...d.preferredRoles, r].sort(),
+                      }))
                     }
                     className={`px-3 py-1.5 rounded-md text-sm border ${
                       on
@@ -324,7 +390,7 @@ export function ProfileModal({ store, open, onClose }: Props) {
                           "Clear ALL hero comfort ratings? This cannot be undone."
                         )
                       ) {
-                        setDraft({ ...draft, heroComfort: {} });
+                        editDraft((d) => ({ ...d, heroComfort: {} }));
                       }
                     }}
                     className="text-[11px] text-enemy/80 hover:text-enemy underline"
@@ -549,7 +615,11 @@ function ImportEditor({
                 title="Win rate %"
               />
               <span className="text-[10px] text-muted">%</span>
-              <div className="flex items-center">
+              <div
+                role="group"
+                aria-label={`${row.heroName} comfort, ${row.suggestedComfort} of 5`}
+                className="flex items-center"
+              >
                 {[1, 2, 3, 4, 5].map((star) => (
                   <button
                     key={star}
@@ -558,12 +628,13 @@ function ImportEditor({
                         suggestedComfort: star as 1 | 2 | 3 | 4 | 5,
                       })
                     }
+                    aria-pressed={star <= row.suggestedComfort}
+                    aria-label={`Set ${row.heroName} comfort to ${star} of 5`}
                     className={`w-4 text-sm leading-none ${
                       star <= row.suggestedComfort
                         ? "text-accent"
                         : "text-muted/40 hover:text-muted"
                     }`}
-                    title={`Comfort ${star}/5`}
                   >
                     ★
                   </button>
@@ -623,7 +694,11 @@ function ComfortGrid({
           >
             <HeroPortrait hero={hero} size="sm" />
             <div className="flex-1 text-xs truncate">{hero.localizedName}</div>
-            <div className="flex">
+            <div
+              role="group"
+              aria-label={`${hero.localizedName} comfort, ${c} of 5`}
+              className="flex"
+            >
               {[1, 2, 3, 4, 5].map((star) => (
                 <button
                   key={star}
@@ -632,6 +707,12 @@ function ComfortGrid({
                       hero.id,
                       (c === star ? 0 : star) as 0 | 1 | 2 | 3 | 4 | 5
                     )
+                  }
+                  aria-pressed={star <= c}
+                  aria-label={
+                    c === star
+                      ? `Clear ${hero.localizedName} comfort`
+                      : `Set ${hero.localizedName} comfort to ${star} of 5`
                   }
                   className={`w-4 text-sm leading-none ${
                     star <= c ? "text-accent" : "text-muted/40 hover:text-muted"

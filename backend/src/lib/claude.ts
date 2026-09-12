@@ -12,6 +12,14 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 
 const MODEL = "claude-sonnet-4-5";
+const CLI_TIMEOUT_MS = 120000;
+
+const IMAGE_EXTENSIONS: Record<string, string | undefined> = {
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/webp": ".webp",
+  "image/gif": ".gif",
+};
 
 export type ClaudeMode = "api" | "cli";
 
@@ -78,26 +86,23 @@ async function runViaCli(opts: ClaudeOptions): Promise<string> {
     return runClaudeCliRaw(opts.prompt);
   }
 
-  const ext =
-    opts.image.mediaType === "image/png"
-      ? ".png"
-      : opts.image.mediaType === "image/jpeg"
-        ? ".jpg"
-        : opts.image.mediaType === "image/webp"
-          ? ".webp"
-          : ".bin";
+  const ext = IMAGE_EXTENSIONS[opts.image.mediaType];
+  if (!ext) {
+    throw new Error(`Unsupported image type: ${opts.image.mediaType}`);
+  }
 
   const imagePath = tempPath(ext);
   const promptPath = tempPath(".txt");
-  writeFileSync(imagePath, Buffer.from(opts.image.base64, "base64"));
-  writeFileSync(promptPath, opts.prompt);
-
-  const cliPrompt =
-    `Read the file at ${promptPath} which contains a prompt. ` +
-    `Then read the image at ${imagePath} and apply that prompt to it. ` +
-    `Follow the prompt's output instructions exactly.`;
 
   try {
+    writeFileSync(imagePath, Buffer.from(opts.image.base64, "base64"));
+    writeFileSync(promptPath, opts.prompt);
+
+    const cliPrompt =
+      `Read the file at ${promptPath} which contains a prompt. ` +
+      `Then read the image at ${imagePath} and apply that prompt to it. ` +
+      `Follow the prompt's output instructions exactly.`;
+
     return await runClaudeCliRaw(cliPrompt);
   } finally {
     safeUnlink(imagePath);
@@ -108,56 +113,97 @@ async function runViaCli(opts: ClaudeOptions): Promise<string> {
 function runClaudeCliRaw(prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const binary = resolveClaudeBinary();
-    const isWin = process.platform === "win32";
-    const usingFullPath = binary !== "claude";
+    const bin = binary === "claude" ? "claude (from PATH)" : binary;
 
-    console.log(
-      `[claude] invoking CLI: ${usingFullPath ? binary : "claude (PATH lookup)"}`
-    );
-
-    let child;
-    if (usingFullPath) {
-      child = spawn(binary, ["-p", prompt, "--allowed-tools", "Read"], {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } else if (isWin) {
-      const escaped = `"${prompt.replace(/"/g, '\\"')}"`;
-      child = spawn(`claude -p ${escaped} --allowed-tools Read`, {
-        shell: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } else {
-      child = spawn("claude", ["-p", prompt, "--allowed-tools", "Read"], {
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    }
+    console.log(`[claude] invoking CLI: ${bin}`);
 
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      finish();
+    };
+
+    // Windows reports an unusable binary synchronously, elsewhere via "error".
+    const failToStart = (detail: string) => {
+      console.error(`[claude] could not spawn ${bin}: ${detail}`);
+      settle(() =>
+        reject(
+          new Error(
+            "Could not start the Claude CLI. Is Claude Code installed and on PATH?"
+          )
+        )
+      );
+    };
+
+    let child;
+    try {
+      // The prompt carries user-controlled text and must never reach a shell.
+      child = spawn(binary, ["-p", prompt, "--allowed-tools", "Read"], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (e) {
+      failToStart(e instanceof Error ? e.message : String(e));
+      return;
+    }
+
+    timer = setTimeout(() => {
+      killProcessTree(child.pid);
+      // Grandchildren can hold these pipes open past the kill.
+      child.stdout.destroy();
+      child.stderr.destroy();
+      settle(() =>
+        reject(
+          new Error(`Claude CLI timed out after ${CLI_TIMEOUT_MS / 1000}s`)
+        )
+      );
+    }, CLI_TIMEOUT_MS);
+
     child.stdout.on("data", (d) => (stdout += d.toString()));
     child.stderr.on("data", (d) => (stderr += d.toString()));
 
-    child.on("error", (e) => {
-      reject(
-        new Error(
-          `Failed to spawn 'claude' CLI. Is Claude Code installed and on PATH? (${e.message})`
-        )
-      );
-    });
+    child.on("error", (e) => failToStart(e.message));
 
     child.on("close", (code) => {
-      if (code !== 0) {
-        const bin = usingFullPath ? binary : "claude (from PATH)";
-        reject(
-          new Error(
-            `claude CLI exited with code ${code}. binary=${bin}\nstderr:\n${stderr.slice(0, 500)}\nstdout:\n${stdout.slice(0, 500)}`
-          )
-        );
-        return;
-      }
-      resolve(stdout);
+      settle(() => {
+        if (code !== 0) {
+          console.error(
+            `[claude] CLI exited with code ${code}. binary=${bin}\nstderr:\n${stderr.slice(0, 2000)}\nstdout:\n${stdout.slice(0, 2000)}`
+          );
+          reject(new Error(`Claude CLI exited with code ${code}`));
+          return;
+        }
+        resolve(stdout);
+      });
     });
   });
+}
+
+function killProcessTree(pid: number | undefined) {
+  if (pid === undefined) return;
+
+  const kill = () => {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  };
+
+  // A plain kill on Windows leaves the CLI's own children running.
+  if (process.platform === "win32") {
+    spawn("taskkill", ["/pid", String(pid), "/t", "/f"], {
+      stdio: "ignore",
+    }).on("error", kill);
+    return;
+  }
+
+  kill();
 }
 
 // Find the first balanced { ... } block in a string, skipping braces

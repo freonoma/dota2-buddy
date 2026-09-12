@@ -70,15 +70,26 @@ function loadJsonIfExists<T>(file: string, fallback: T): T {
   }
 }
 
+interface DataFileMeta {
+  generatedAt?: string;
+  source?: string;
+}
+
 let matchupTable: MatchupTable = {};
 let heroMetaTable: HeroMetaTable = {};
+let fileMeta: DataFileMeta = {};
 let dataLoadedAt: string | null = null;
 
 export function reloadDynamicData(): void {
   matchupTable = loadJsonIfExists<MatchupTable>("matchups.json", {});
-  heroMetaTable = loadJsonIfExists<HeroMetaTable>("hero_stats.json", {});
-  // Refine positions from heroMetaTable if we have it.
-  // (heroMetaTable optionally carries per-position pick rates we set in fetch-data.)
+
+  // fetch-data's stamp is not a hero, so keep it out of the id-indexed table.
+  const { _meta, ...meta } = loadJsonIfExists<
+    HeroMetaTable & { _meta?: DataFileMeta }
+  >("hero_stats.json", {});
+  heroMetaTable = meta;
+  fileMeta = _meta ?? {};
+
   dataLoadedAt = existsSync(join(DATA_DIR, "matchups.json"))
     ? new Date().toISOString()
     : null;
@@ -108,5 +119,7 @@ export function getDataStatus() {
     matchupHeroCount: Object.keys(matchupTable).length,
     metaHeroCount: Object.keys(heroMetaTable).length,
     dataLoadedAt,
+    generatedAt: fileMeta.generatedAt ?? null,
+    source: fileMeta.source ?? null,
   };
 }

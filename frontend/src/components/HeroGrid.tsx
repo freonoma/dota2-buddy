@@ -30,38 +30,40 @@ export function HeroGrid({ store }: Props) {
   );
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return store.heroes
-      .filter((h) => {
-        if (filter === "str" && h.primaryAttr !== "str") return false;
-        if (filter === "agi" && h.primaryAttr !== "agi") return false;
-        if (filter === "int" && h.primaryAttr !== "int") return false;
-        if (filter === "all_attr" && h.primaryAttr !== "all") return false;
-        if (q && !h.localizedName.toLowerCase().includes(q)) return false;
-        return true;
-      })
-      .sort((a, b) => a.localizedName.localeCompare(b.localizedName));
+    const q = search.trim();
+    const byAttr = store.heroes.filter((h) => {
+      if (filter === "str" && h.primaryAttr !== "str") return false;
+      if (filter === "agi" && h.primaryAttr !== "agi") return false;
+      if (filter === "int" && h.primaryAttr !== "int") return false;
+      if (filter === "all_attr" && h.primaryAttr !== "all") return false;
+      return true;
+    });
+    if (!q) {
+      return byAttr.sort((a, b) =>
+        a.localizedName.localeCompare(b.localizedName)
+      );
+    }
+    return byAttr
+      .map((hero) => ({ hero, score: heroSearchScore(hero, q) }))
+      .filter((m) => m.score > 0)
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          a.hero.localizedName.localeCompare(b.hero.localizedName)
+      )
+      .map((m) => m.hero);
   }, [store.heroes, filter, search]);
 
-  const handleClick = (
-    e: React.MouseEvent,
-    hero: Hero
-  ) => {
+  const handleClick = (e: React.MouseEvent, hero: Hero) => {
     e.preventDefault();
-    if (e.button === 2 || e.ctrlKey === false && e.shiftKey) {
-      store.addHero(hero.id, "enemy");
-      return;
-    }
-    if (e.ctrlKey || e.metaKey) {
-      store.addHero(hero.id, "ban");
-      return;
-    }
-    store.addHero(hero.id, "ally");
+    store.addHero(hero.id, e.ctrlKey || e.metaKey ? "ban" : "ally");
+    setSearch("");
   };
 
   const handleContextMenu = (e: React.MouseEvent, hero: Hero) => {
     e.preventDefault();
     store.addHero(hero.id, "enemy");
+    setSearch("");
   };
 
   return (
@@ -135,4 +137,32 @@ export function HeroGrid({ store }: Props) {
       `}</style>
     </div>
   );
+}
+
+function normalize(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function heroInitials(localizedName: string): string {
+  return localizedName
+    .split(/[\s-]+/)
+    .map((word) => normalize(word).charAt(0))
+    .join("");
+}
+
+function heroSearchScore(hero: Hero, query: string): number {
+  const q = normalize(query);
+  if (!q) return 0;
+  const targets = [
+    normalize(hero.localizedName),
+    normalize(hero.shortName),
+    heroInitials(hero.localizedName),
+  ];
+  let best = 0;
+  for (const target of targets) {
+    if (target === q) return 3;
+    if (target.startsWith(q)) best = Math.max(best, 2);
+    else if (target.includes(q)) best = Math.max(best, 1);
+  }
+  return best;
 }

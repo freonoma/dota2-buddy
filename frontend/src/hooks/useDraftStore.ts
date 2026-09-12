@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer } from "react";
+import { useCallback, useEffect, useReducer, useRef } from "react";
 import type {
   DraftState,
   Hero,
@@ -7,6 +7,13 @@ import type {
   SlotKind,
 } from "../types";
 
+export interface DataStatus {
+  heroCount: number;
+  matchupHeroCount: number;
+  metaHeroCount: number;
+  dataLoadedAt: string | null;
+}
+
 interface AppState {
   heroes: Hero[];
   heroById: Map<number, Hero>;
@@ -14,6 +21,8 @@ interface AppState {
   recommendations: Recommendation[];
   profile: PlayerProfile | null;
   connected: boolean;
+  dataStatus: DataStatus | null;
+  profileSaveError: string | null;
 }
 
 type Action =
@@ -21,6 +30,8 @@ type Action =
   | { type: "set-recommendations"; recs: Recommendation[] }
   | { type: "set-profile"; profile: PlayerProfile }
   | { type: "set-connected"; connected: boolean }
+  | { type: "set-data-status"; status: DataStatus }
+  | { type: "set-profile-save-error"; message: string | null }
   | { type: "set-draft"; draft: DraftState }
   | { type: "add-hero"; heroId: number; kind: SlotKind }
   | { type: "remove-hero"; heroId: number }
@@ -28,6 +39,15 @@ type Action =
   | { type: "set-round"; round: 1 | 2 | 3 }
   | { type: "set-side"; side: "radiant" | "dire" }
   | { type: "reset" };
+
+const SLOT_LIMITS: Record<SlotKind, number> = {
+  ally: 5,
+  enemy: 5,
+  ban: 8,
+};
+
+const RECONNECT_BASE_MS = 500;
+const RECONNECT_MAX_MS = 5000;
 
 const INITIAL_DRAFT: DraftState = {
   allyPicks: [],
@@ -45,6 +65,8 @@ const INITIAL_STATE: AppState = {
   recommendations: [],
   profile: null,
   connected: false,
+  dataStatus: null,
+  profileSaveError: null,
 };
 
 function withoutHero(arr: number[], id: number): number[] {
@@ -76,6 +98,10 @@ function reducer(state: AppState, action: Action): AppState {
       return { ...state, profile: action.profile };
     case "set-connected":
       return { ...state, connected: action.connected };
+    case "set-data-status":
+      return { ...state, dataStatus: action.status };
+    case "set-profile-save-error":
+      return { ...state, profileSaveError: action.message };
     case "set-draft":
       return { ...state, draft: action.draft };
     case "add-hero": {
@@ -85,7 +111,7 @@ function reducer(state: AppState, action: Action): AppState {
         enemyPicks: withoutHero(state.draft.enemyPicks, heroId),
         bans: withoutHero(state.draft.bans, heroId),
       };
-      const limit = kind === "ban" ? 8 : 5;
+      const limit = SLOT_LIMITS[kind];
       const target =
         kind === "ally" ? cleaned.allyPicks : kind === "enemy" ? cleaned.enemyPicks : cleaned.bans;
       if (target.length >= limit) return state;
@@ -134,37 +160,81 @@ function reducer(state: AppState, action: Action): AppState {
 
 export function useDraftStore() {
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
-  const wsRef = useMemo(() => ({ current: null as WebSocket | null }), []);
+  const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${proto}//${location.host}/ws`);
-    wsRef.current = ws;
+    let attempt = 0;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
-    ws.onopen = () => dispatch({ type: "set-connected", connected: true });
-    ws.onclose = () => dispatch({ type: "set-connected", connected: false });
-    ws.onerror = () => dispatch({ type: "set-connected", connected: false });
-    ws.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data);
-        switch (msg.type) {
-          case "heroes":
-            dispatch({ type: "set-heroes", heroes: msg.payload });
-            break;
-          case "recommendations":
-            dispatch({ type: "set-recommendations", recs: msg.payload });
-            break;
-          case "profile":
-            dispatch({ type: "set-profile", profile: msg.payload });
-            break;
+    function scheduleReconnect() {
+      const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** attempt);
+      attempt += 1;
+      retryTimer = setTimeout(connect, delay);
+    }
+
+    function connect() {
+      const proto = location.protocol === "https:" ? "wss:" : "ws:";
+      const ws = new WebSocket(`${proto}//${location.host}/ws`);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        attempt = 0;
+        dispatch({ type: "set-connected", connected: true });
+      };
+      ws.onclose = () => {
+        dispatch({ type: "set-connected", connected: false });
+        scheduleReconnect();
+      };
+      ws.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          switch (msg.type) {
+            case "heroes":
+              dispatch({ type: "set-heroes", heroes: msg.payload });
+              break;
+            case "recommendations":
+              dispatch({ type: "set-recommendations", recs: msg.payload });
+              break;
+            case "profile":
+              dispatch({ type: "set-profile", profile: msg.payload });
+              break;
+            case "data-status":
+              dispatch({ type: "set-data-status", status: msg.payload });
+              break;
+            case "error":
+              if (msg.payload?.request === "save-profile") {
+                dispatch({
+                  type: "set-profile-save-error",
+                  message: msg.payload.message,
+                });
+              } else {
+                console.error("[ws]", msg.payload?.message);
+              }
+              break;
+          }
+        } catch {
+          // A frame the server should never send is not worth closing over.
         }
-      } catch {
-        /* ignore */
-      }
-    };
+      };
+    }
+
+    connect();
 
     return () => {
-      ws.close();
+      clearTimeout(retryTimer);
+      const ws = wsRef.current;
+      wsRef.current = null;
+      if (!ws) return;
+      // Detach so this close cannot report a disconnect after a remount.
+      ws.onclose = null;
+      ws.onmessage = null;
+      // Closing mid-handshake makes the browser log a failed connection, so
+      // a socket that has not finished opening is closed once it has.
+      if (ws.readyState === WebSocket.CONNECTING) {
+        ws.addEventListener("open", () => ws.close(), { once: true });
+      } else {
+        ws.close();
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -178,7 +248,7 @@ export function useDraftStore() {
         payload: state.draft,
       })
     );
-  }, [state.draft, state.connected, wsRef]);
+  }, [state.draft, state.connected, state.profile]);
 
   const addHero = useCallback(
     (heroId: number, kind: SlotKind) => dispatch({ type: "add-hero", heroId, kind }),
@@ -202,16 +272,37 @@ export function useDraftStore() {
   );
   const reset = useCallback(() => dispatch({ type: "reset" }), []);
   const saveProfile = useCallback(
-    (profile: PlayerProfile) => {
+    (profile: PlayerProfile): boolean => {
       const ws = wsRef.current;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        dispatch({
+          type: "set-profile-save-error",
+          message:
+            "Not connected to the backend — nothing was saved. Reconnect and save again.",
+        });
+        return false;
+      }
       ws.send(JSON.stringify({ type: "save-profile", payload: profile }));
+      dispatch({ type: "set-profile-save-error", message: null });
+      return true;
     },
-    [wsRef]
+    []
   );
+  const clearProfileSaveError = useCallback(
+    () => dispatch({ type: "set-profile-save-error", message: null }),
+    []
+  );
+
+  const slotsFull: Record<SlotKind, boolean> = {
+    ally: state.draft.allyPicks.length >= SLOT_LIMITS.ally,
+    enemy: state.draft.enemyPicks.length >= SLOT_LIMITS.enemy,
+    ban: state.draft.bans.length >= SLOT_LIMITS.ban,
+  };
 
   return {
     ...state,
+    slotsFull,
+    slotLimits: SLOT_LIMITS,
     addHero,
     removeHero,
     setRole,
@@ -219,6 +310,7 @@ export function useDraftStore() {
     setSide,
     reset,
     saveProfile,
+    clearProfileSaveError,
   };
 }
 

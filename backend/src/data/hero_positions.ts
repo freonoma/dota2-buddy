@@ -127,11 +127,11 @@ export const HERO_POSITIONS: Record<number, number[]> = {
   126: [2],            // Void Spirit
   128: [4, 5],         // Snapfire
   129: [3],            // Mars
-  131: [3],            // Ringmaster (new-ish)
+  131: [4, 5],         // Ring Master
   135: [3, 5],         // Dawnbreaker
   136: [4],            // Marci
   137: [3],            // Primal Beast
   138: [1, 2],         // Muerta
-  145: [4, 5],         // Ringmaster
-  149: [2],            // Kez
+  145: [1, 2],         // Kez
+  155: [4, 5],         // Largo
 };

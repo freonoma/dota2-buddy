@@ -67,9 +67,9 @@ export async function extractFromScreenshot(
     );
   }
 
-  let parsed: RawExtraction;
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(jsonStr) as RawExtraction;
+    parsed = JSON.parse(jsonStr);
   } catch {
     throw new Error(
       `Could not parse Claude response as JSON. Raw output:\n${rawText.slice(0, 500)}`
@@ -80,51 +80,77 @@ export async function extractFromScreenshot(
 }
 
 function matchAndScore(
-  extraction: RawExtraction,
+  parsed: unknown,
   rawText: string
 ): ScreenshotImportResult {
+  const payload = parsed as { heroes?: unknown } | null;
+  if (!payload || !Array.isArray(payload.heroes)) {
+    throw new Error(
+      `Claude response contained no "heroes" array. Raw output:\n${rawText.slice(0, 500)}`
+    );
+  }
+
   const heroes = getHeroes();
   const matched: ScreenshotImportResult["matched"] = [];
   const unmatched: ScreenshotImportResult["unmatched"] = [];
 
-  for (const row of extraction.heroes ?? []) {
-    if (!row.hero_name || typeof row.games_played !== "number") continue;
+  for (const row of payload.heroes as unknown[]) {
+    const record = (row ?? {}) as Partial<RawExtraction["heroes"][number]>;
+    const rawName =
+      typeof record.hero_name === "string" ? record.hero_name.trim() : "";
+    const gamesPlayed = toCount(record.games_played);
+    const winRate = toWinRate(record.win_rate_percent);
+    const hero = rawName ? matchHero(rawName, heroes) : undefined;
 
-    const hero = matchHero(row.hero_name, heroes);
-    const winRate =
-      typeof row.win_rate_percent === "number"
-        ? row.win_rate_percent / 100
-        : undefined;
-
-    if (hero) {
-      matched.push({
-        heroId: hero.id,
-        heroName: hero.localizedName,
-        gamesPlayed: row.games_played,
-        wins: row.wins,
-        winRate,
-        suggestedComfort: computeComfort(row.games_played, winRate),
-      });
-    } else {
+    if (!hero || gamesPlayed === undefined) {
       unmatched.push({
-        rawName: row.hero_name,
-        gamesPlayed: row.games_played,
+        rawName: rawName || "(unreadable row)",
+        gamesPlayed: gamesPlayed ?? 0,
         winRate,
       });
+      continue;
     }
+
+    matched.push({
+      heroId: hero.id,
+      heroName: hero.localizedName,
+      gamesPlayed,
+      wins: toCount(record.wins),
+      winRate,
+      suggestedComfort: computeComfort(gamesPlayed, winRate),
+    });
   }
 
   return { matched, unmatched, rawText };
 }
 
-function matchHero(name: string, heroes: Hero[]): Hero | undefined {
-  const lower = name.toLowerCase().trim();
-  let hit = heroes.find((h) => h.localizedName.toLowerCase() === lower);
-  if (hit) return hit;
+function toCount(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+  return Math.round(value);
+}
+
+function toWinRate(percent: unknown): number | undefined {
+  if (typeof percent !== "number" || !Number.isFinite(percent)) return undefined;
+  if (percent < 0 || percent > 100) return undefined;
+  return percent / 100;
+}
+
+// "od" is inside "Bloodseeker", "io" inside "Legion Commander".
+const MIN_SUBSTRING_LENGTH = 4;
+
+export function matchHero(name: string, heroes: Hero[]): Hero | undefined {
+  const query = normalizeName(name);
+  if (!query) return undefined;
+
+  const exact = heroes.find((h) => normalizeName(h.localizedName) === query);
+  if (exact) return exact;
+
   const aliases: Record<string, string> = {
     am: "anti-mage",
     cm: "crystal maiden",
-    od: "outworld destroyer",
+    od: "outworld devourer",
     qop: "queen of pain",
     sf: "shadow fiend",
     pa: "phantom assassin",
@@ -133,27 +159,34 @@ function matchHero(name: string, heroes: Hero[]): Hero | undefined {
     wk: "wraith king",
     tb: "terrorblade",
     np: "natures prophet",
-    "nature's prophet": "natures prophet",
   };
-  const aliased = aliases[lower];
+  const aliased = aliases[query];
   if (aliased) {
-    hit = heroes.find((h) =>
-      h.localizedName.toLowerCase().replace("'", "").includes(aliased)
-    );
+    const hit = heroes.find((h) => normalizeName(h.localizedName) === aliased);
     if (hit) return hit;
   }
-  hit = heroes.find((h) => h.localizedName.toLowerCase().includes(lower));
-  if (hit) return hit;
-  hit = heroes.find((h) => lower.includes(h.localizedName.toLowerCase()));
-  if (hit) return hit;
-  const noApos = lower.replace(/['']/g, "");
-  hit = heroes.find(
-    (h) => h.localizedName.toLowerCase().replace(/['']/g, "") === noApos
+
+  if (query.length < MIN_SUBSTRING_LENGTH) return undefined;
+
+  const contains = heroes.filter((h) =>
+    normalizeName(h.localizedName).includes(query)
   );
-  return hit;
+  if (contains.length > 0) {
+    return contains.length === 1 ? contains[0] : undefined;
+  }
+
+  const containedBy = heroes.filter((h) => {
+    const heroName = normalizeName(h.localizedName);
+    return heroName.length >= MIN_SUBSTRING_LENGTH && query.includes(heroName);
+  });
+  return containedBy.length === 1 ? containedBy[0] : undefined;
 }
 
-function computeComfort(
+function normalizeName(value: string): string {
+  return value.trim().toLowerCase().replace(/['’]/g, "");
+}
+
+export function computeComfort(
   games: number,
   winRate?: number
 ): 1 | 2 | 3 | 4 | 5 {

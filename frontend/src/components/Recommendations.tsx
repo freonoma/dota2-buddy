@@ -48,21 +48,30 @@ export function Recommendations({ store }: Props) {
 function ScoreLegend() {
   return (
     <div className="px-4 py-2 border-b border-white/5 text-[10px] text-muted flex items-center gap-3 flex-wrap">
-      <span title="How well this hero counters the enemy team">
-        <b className="text-slate-400">counter</b> · winrate vs enemy picks
+      <span className="text-slate-400">0-100 scores, not win rates</span>
+      <span title="Matchup edge against the enemy picks, beyond what this hero's overall strength already implies. 50 is neutral.">
+        <b className="text-slate-400">counter</b> · edge vs enemy picks
       </span>
-      <span title="How well this hero fits with the ally team composition">
+      <span title="How well this hero's roles fill the gaps in the ally team. 50 is neutral.">
         <b className="text-slate-400">synergy</b> · fits ally team
       </span>
-      <span title="Hero's overall winrate at your bracket">
-        <b className="text-slate-400">meta</b> · bracket winrate
+      <span title="This hero's overall win rate at your bracket, rescaled.">
+        <b className="text-slate-400">meta</b> · bracket strength
       </span>
-      <span title="Your personal experience on this hero">
+      <span title="Your star rating for this hero, rescaled.">
         <b className="text-slate-400">comfort</b> · your hero pool
       </span>
     </div>
   );
 }
+
+const EXPLAIN_TIMEOUT_MS = 30000;
+
+// An explanation is only valid for the draft it was requested for.
+type ExplainState =
+  | { draftKey: string; status: "loading" }
+  | { draftKey: string; status: "ready"; text: string }
+  | { draftKey: string; status: "error" };
 
 function RecRow({
   rec,
@@ -82,16 +91,16 @@ function RecRow({
   yourRole: number;
 }) {
   const hero = heroById.get(rec.heroId);
-  const [explanation, setExplanation] = useState<string | null>(null);
-  const [explainLoading, setExplainLoading] = useState(false);
-  const [explainError, setExplainError] = useState<string | null>(null);
+  const [explain, setExplain] = useState<ExplainState | null>(null);
 
   if (!hero) return null;
 
+  const draftKey = `${yourRole}|${draftAllies.join(",")}|${draftEnemies.join(",")}`;
+  const current = explain?.draftKey === draftKey ? explain : null;
+
   const fetchExplanation = async () => {
-    if (explanation || explainLoading) return;
-    setExplainLoading(true);
-    setExplainError(null);
+    if (current && current.status !== "error") return;
+    setExplain({ draftKey, status: "loading" });
     try {
       const res = await fetch("/api/explain", {
         method: "POST",
@@ -102,16 +111,22 @@ function RecRow({
           enemyHeroIds: draftEnemies,
           yourRole,
         }),
+        signal: AbortSignal.timeout(EXPLAIN_TIMEOUT_MS),
       });
       const json = await res.json();
       if (!res.ok) {
         throw new Error(json.error ?? `HTTP ${res.status}`);
       }
-      setExplanation(json.explanation);
+      setExplain((prev) =>
+        prev?.draftKey === draftKey
+          ? { draftKey, status: "ready", text: json.explanation }
+          : prev
+      );
     } catch (e) {
-      setExplainError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setExplainLoading(false);
+      console.error("Explain request failed", e);
+      setExplain((prev) =>
+        prev?.draftKey === draftKey ? { draftKey, status: "error" } : prev
+      );
     }
   };
 
@@ -139,22 +154,28 @@ function RecRow({
             <ComfortStars value={comfort} />
             <button
               onClick={fetchExplanation}
-              disabled={explainLoading}
+              disabled={current?.status === "loading"}
               className="ml-auto text-[10px] uppercase tracking-wider text-accent/80 hover:text-accent disabled:text-muted px-1.5 py-0.5 rounded border border-accent/20 hover:border-accent/50"
               title="Get a one-sentence reasoning from Claude"
             >
-              {explainLoading ? "thinking…" : explanation ? "why ✓" : "why?"}
+              {current?.status === "loading"
+                ? "thinking…"
+                : current?.status === "ready"
+                  ? "why ✓"
+                  : "why?"}
             </button>
           </div>
         </div>
       </div>
-      {explanation && (
+      {current?.status === "ready" && (
         <div className="mt-2 pl-9 text-xs text-slate-300 leading-relaxed border-l-2 border-accent/30 ml-3 pl-3">
-          {explanation}
+          {current.text}
         </div>
       )}
-      {explainError && (
-        <div className="mt-2 pl-9 text-xs text-enemy/80">{explainError}</div>
+      {current?.status === "error" && (
+        <div className="mt-2 pl-9 text-xs text-enemy/80">
+          Couldn't get an explanation — try again.
+        </div>
       )}
     </div>
   );

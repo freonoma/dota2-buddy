@@ -2,13 +2,14 @@
 // them to backend/data/ as JSON. Re-run after each Dota patch.
 //
 //   npm run fetch-data
+//   npm run fetch-data -- --force   (overwrite even if the new data is much smaller)
 //
 // Source selection:
 //   - STRATZ_API_KEY set → Stratz GraphQL (bracket-filtered matchups)
 //   - otherwise          → OpenDota REST (global matchups, free, slower)
 
 import "dotenv/config";
-import { writeFileSync, mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { HeroMetaTable, MatchupTable } from "../types.js";
@@ -16,40 +17,125 @@ import type { HeroMetaTable, MatchupTable } from "../types.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = join(__dirname, "..", "..", "data");
 
+// Keeping less than this share of an existing file counts as a failed fetch.
+const MIN_RETAINED_SHARE = 0.8;
+const MAX_SKIPPED_SHARE = 0.1;
+
+type DataSource = "stratz" | "opendota";
+
+interface HeroStatsFile extends HeroMetaTable {
+  _meta: { generatedAt: string; source: DataSource };
+}
+
+interface FetchResult {
+  total: number;
+  skipped: number;
+  bailed: boolean;
+  written: boolean;
+}
+
 async function main() {
   mkdirSync(DATA_DIR, { recursive: true });
 
+  const force = process.argv.slice(2).includes("--force");
+
+  let result: FetchResult;
   if (process.env.STRATZ_API_KEY) {
     console.log("Using Stratz GraphQL (STRATZ_API_KEY detected)");
-    await fetchFromStratz();
+    result = await fetchFromStratz(force);
   } else {
     console.log("Using OpenDota REST (no STRATZ_API_KEY set)");
-    await fetchFromOpenDota();
+    result = await fetchFromOpenDota(force);
+  }
+
+  const incomplete =
+    result.bailed ||
+    result.total === 0 ||
+    result.skipped > result.total * MAX_SKIPPED_SHARE;
+  if (incomplete) {
+    console.error(
+      `\nIncomplete run: ${result.skipped} of ${result.total} heroes have no matchup data.`
+    );
+    console.error(`     Re-run before relying on these recommendations.`);
+  }
+  if (incomplete || !result.written) {
+    process.exitCode = 1;
+    return;
   }
 
   console.log("\nDone. Restart the backend or POST /api/reload to pick up the new data.");
 }
 
-function writeOutputs(meta: HeroMetaTable, matchups: MatchupTable) {
-  writeFileSync(
-    join(DATA_DIR, "hero_stats.json"),
-    JSON.stringify(meta, null, 2)
-  );
-  console.log(`     wrote hero_stats.json (${Object.keys(meta).length} heroes)`);
+function writeOutputs(
+  meta: HeroMetaTable,
+  matchups: MatchupTable,
+  source: DataSource,
+  force: boolean
+): boolean {
+  const metaCount = Object.keys(meta).length;
+  const matchupCount = Object.keys(matchups).length;
 
-  if (Object.keys(matchups).length > 0) {
-    writeFileSync(
-      join(DATA_DIR, "matchups.json"),
-      JSON.stringify(matchups, null, 2)
-    );
-    console.log(
-      `     wrote matchups.json (${Object.keys(matchups).length} heroes)`
-    );
+  const shrinking = [
+    shrinkReason("hero_stats.json", metaCount),
+    matchupCount > 0 ? shrinkReason("matchups.json", matchupCount) : null,
+  ].filter((reason) => reason !== null);
+
+  if (shrinking.length > 0) {
+    if (!force) {
+      console.log(`\n  ⚠  Refusing to replace a larger dataset:`);
+      for (const reason of shrinking) console.log(`       ${reason}`);
+      console.log(
+        `     Nothing written. Re-run when the API is healthy, or pass --force to overwrite.`
+      );
+      return false;
+    }
+    for (const reason of shrinking) {
+      console.log(`     overwriting anyway (--force): ${reason}`);
+    }
+  }
+
+  const stats: HeroStatsFile = {
+    ...meta,
+    _meta: { generatedAt: new Date().toISOString(), source },
+  };
+  writeJson("hero_stats.json", stats);
+  console.log(`     wrote hero_stats.json (${metaCount} heroes)`);
+
+  if (matchupCount > 0) {
+    writeJson("matchups.json", matchups);
+    console.log(`     wrote matchups.json (${matchupCount} heroes)`);
   } else {
     console.log(
       `     no matchup data fetched — matchups.json not written. App will run without counter scoring.`
     );
   }
+  return true;
+}
+
+function shrinkReason(file: string, newCount: number): string | null {
+  const existing = existingHeroCount(file);
+  if (existing === 0 || newCount >= existing * MIN_RETAINED_SHARE) return null;
+  return `${file} holds ${existing} heroes, this run produced ${newCount}`;
+}
+
+// Missing or unparseable counts as zero so a first run is never blocked.
+function existingHeroCount(file: string): number {
+  try {
+    const parsed = JSON.parse(
+      readFileSync(join(DATA_DIR, file), "utf-8")
+    ) as Record<string, unknown>;
+    return Object.keys(parsed).filter((key) => /^\d+$/.test(key)).length;
+  } catch {
+    return 0;
+  }
+}
+
+// Rename keeps an interrupted run from leaving a half-written file.
+function writeJson(file: string, value: unknown) {
+  const path = join(DATA_DIR, file);
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, JSON.stringify(value, null, 2));
+  renameSync(tmp, path);
 }
 
 // ============================================================
@@ -75,7 +161,7 @@ interface OpenDotaMatchup {
   wins: number;
 }
 
-async function fetchFromOpenDota() {
+async function fetchFromOpenDota(force: boolean): Promise<FetchResult> {
   console.log("[1/2] Fetching heroStats from OpenDota…");
   const heroStats = await opendotaFetch<OpenDotaHeroStat[]>(
     `${OPENDOTA_BASE}/heroStats`
@@ -109,6 +195,7 @@ async function fetchFromOpenDota() {
   let i = 0;
   let consecutiveFails = 0;
   let totalFails = 0;
+  let bailed = false;
   const MAX_CONSECUTIVE_FAILS = 5;
 
   for (const h of heroStats) {
@@ -146,6 +233,7 @@ async function fetchFromOpenDota() {
         console.log(
           `       curl -s -o /dev/null -w "%{http_code}\\n" https://api.opendota.com/api/heroes/1/matchups`
         );
+        bailed = true;
         break;
       }
     }
@@ -155,7 +243,13 @@ async function fetchFromOpenDota() {
   if (totalFails > 0) {
     console.log(`     ${totalFails} hero(es) skipped due to errors`);
   }
-  writeOutputs(heroMeta, matchups);
+  const written = writeOutputs(heroMeta, matchups, "opendota", force);
+  return {
+    total: heroStats.length,
+    skipped: heroStats.length - Object.keys(matchups).length,
+    bailed,
+    written,
+  };
 }
 
 async function opendotaFetch<T>(url: string): Promise<T> {
@@ -194,7 +288,7 @@ const STRATZ_GRAPHQL = "https://api.stratz.com/graphql";
 const STRATZ_INTERVAL_MS = 600; // ~100 req/min, well under the 150/min limit
 const STRATZ_BRACKET = "LEGEND_ANCIENT"; // RankBracketBasicEnum value
 
-async function fetchFromStratz() {
+async function fetchFromStratz(force: boolean): Promise<FetchResult> {
   console.log("[1/2] Fetching hero list from Stratz…");
   const heroListData = await stratzQuery<{
     constants: { heroes: Array<{ id: number; displayName: string }> };
@@ -216,6 +310,7 @@ async function fetchFromStratz() {
   let i = 0;
   let totalFails = 0;
   let consecutiveFails = 0;
+  let bailed = false;
   const MAX_CONSECUTIVE_FAILS = 5;
 
   for (const h of heroes) {
@@ -292,6 +387,7 @@ async function fetchFromStratz() {
         );
         console.log(`     Check your STRATZ_API_KEY at https://stratz.com/api`);
         console.log(`     Or unset it in backend/.env to fall back to OpenDota.`);
+        bailed = true;
         break;
       }
     }
@@ -301,7 +397,13 @@ async function fetchFromStratz() {
   if (totalFails > 0) {
     console.log(`     ${totalFails} hero(es) skipped due to errors`);
   }
-  writeOutputs(heroMeta, matchups);
+  const written = writeOutputs(heroMeta, matchups, "stratz", force);
+  return {
+    total: heroes.length,
+    skipped: heroes.length - Object.keys(matchups).length,
+    bailed,
+    written,
+  };
 }
 
 async function stratzQuery<T>(

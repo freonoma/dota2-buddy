@@ -9,12 +9,14 @@ export interface ReasoningRequest {
   rankBracket?: string;
 }
 
+const MAX_CACHE_ENTRIES = 500;
+
 const cache = new Map<string, string>();
 
 function cacheKey(req: ReasoningRequest): string {
   const allies = [...req.allyHeroIds].sort((a, b) => a - b).join(",");
   const enemies = [...req.enemyHeroIds].sort((a, b) => a - b).join(",");
-  return `${req.heroId}|${req.yourRole}|${allies}|${enemies}`;
+  return `${req.heroId}|${req.yourRole}|${req.rankBracket ?? "-"}|${allies}|${enemies}`;
 }
 
 function buildPrompt(req: ReasoningRequest): string {
@@ -55,6 +57,14 @@ export async function explainPick(req: ReasoningRequest): Promise<string> {
   const prompt = buildPrompt(req);
   const text = await runClaude({ prompt, maxTokens: 400 });
   const cleaned = text.trim();
+  if (!cleaned) {
+    throw new Error("Claude returned an empty explanation");
+  }
+
+  if (cache.size >= MAX_CACHE_ENTRIES) {
+    const oldest = cache.keys().next();
+    if (!oldest.done) cache.delete(oldest.value);
+  }
   cache.set(key, cleaned);
   return cleaned;
 }

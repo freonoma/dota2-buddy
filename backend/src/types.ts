@@ -39,7 +39,6 @@ export interface RecommendationBreakdown {
   synergyScore: number;
   metaScore: number;
   comfortScore: number;
-  roleScore: number;
 }
 
 export interface Recommendation {
@@ -50,11 +49,24 @@ export interface Recommendation {
   reasoning?: string;
 }
 
+export const RANK_BRACKETS = [
+  "herald",
+  "guardian",
+  "crusader",
+  "archon",
+  "legend",
+  "ancient",
+  "divine",
+  "immortal",
+] as const;
+
+export type RankBracket = (typeof RANK_BRACKETS)[number];
+
 export interface PlayerProfile {
   name: string;
   friendId?: string;
   mmr?: number;
-  rankBracket: "herald" | "guardian" | "crusader" | "archon" | "legend" | "ancient" | "divine" | "immortal";
+  rankBracket: RankBracket;
   preferredRoles: number[];
   heroComfort: Record<
     number,
@@ -86,7 +98,13 @@ export interface ScreenshotImportResult {
 }
 
 export interface ServerToClientMessage {
-  type: "draft-state" | "recommendations" | "heroes" | "profile" | "data-status";
+  type:
+    | "draft-state"
+    | "recommendations"
+    | "heroes"
+    | "profile"
+    | "data-status"
+    | "error";
   payload: unknown;
 }
 

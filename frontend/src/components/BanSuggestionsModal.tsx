@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Hero } from "../types";
 import { HeroPortrait } from "./HeroPortrait";
 
+// Mirrors BanSuggestion in backend/src/engine/bans.ts, the shape /api/bans returns.
 interface BanSuggestion {
   heroId: number;
   heroName: string;
@@ -26,6 +27,7 @@ export function BanSuggestionsModal({ open, onClose, heroes }: Props) {
   const [suggestions, setSuggestions] = useState<BanSuggestion[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const heroById = new Map(heroes.map((h) => [h.id, h]));
 
   useEffect(() => {
@@ -48,6 +50,15 @@ export function BanSuggestionsModal({ open, onClose, heroes }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
+  useEffect(() => {
+    if (!open) return;
+    const previous = document.activeElement;
+    dialogRef.current?.focus();
+    return () => {
+      if (previous instanceof HTMLElement) previous.focus();
+    };
+  }, [open]);
+
   if (!open) return null;
 
   return (
@@ -56,11 +67,19 @@ export function BanSuggestionsModal({ open, onClose, heroes }: Props) {
       onClick={onClose}
     >
       <div
-        className="panel w-full max-w-2xl max-h-[90vh] flex flex-col"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ban-suggestions-title"
+        tabIndex={-1}
+        className="panel w-full max-w-2xl max-h-[90vh] flex flex-col focus:outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="panel-header">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-300">
+          <h2
+            id="ban-suggestions-title"
+            className="text-sm font-semibold uppercase tracking-wide text-slate-300"
+          >
             Pre-queue ban suggestions
           </h2>
           <button onClick={onClose} className="btn-ghost">
